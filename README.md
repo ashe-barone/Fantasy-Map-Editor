@@ -4,7 +4,7 @@ A browser-based editor for annotating fantasy and world maps with pins, regions,
 
 **[Try it live →](https://ashe-barone.github.io/Fantasy-Map-Editor/)**
 
-![Fantasy Map Editor showing a generated world](docs/screenshot.png)
+![Fantasy Map Editor showing a generated world](screenshot.png)
 
 ## Features
 
