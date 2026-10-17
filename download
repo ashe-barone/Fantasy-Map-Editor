@@ -1,0 +1,9 @@
+# OS / editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local-only files (never commit credentials or personal projects)
+config.js
+*.local.json
