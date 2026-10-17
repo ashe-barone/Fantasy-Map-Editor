@@ -1058,7 +1058,7 @@
   <span id="title-text">&#9670; World Map</span>
   <div class="toolbar-sep"></div>
   <button id="btn-load-img" title="Load your map image">Load Map</button>
-  <button id="btn-load-sample" title="Load the sample project" style="background:#2a2010;border-color:#8a6a3a;color:#c8aa70;">✦ Load Sample</button>
+  <button id="btn-random-map" title="Generate a random world with terrain, settlements and roads" style="background:#2a2010;border-color:#8a6a3a;color:#c8aa70;">🎲 Random Map</button>
   <div class="toolbar-sep"></div>
   <div style="position:relative;">
     <button id="btn-layers" title="Manage map image layers">&#9635; Layers</button>
@@ -1150,6 +1150,7 @@
       <h2>Your World Awaits</h2>
       <p>Drop map images and/or a pins JSON here, or click to browse</p>
       <button id="btn-browse">Browse for map&hellip;</button>
+      <button id="btn-random-map-start" style="margin-left:6px;background:#2a2010;border-color:#8a6a3a;">🎲 Generate a random map</button>
     </div>
   </div>
   <div id="map-canvas">
@@ -2723,31 +2724,206 @@
 
   // File input
   const fileInputImg = document.getElementById('file-input-img');
-  // ── Sample project ───────────────────────────────────────────────────────
-  // Loads sample-project.json from the same folder as this page (GitHub Pages).
-  // The button hides itself when no sample file is present (e.g. opened via file://).
-  const SAMPLE_URL = 'sample-project.json';
+  // ── Random world generator ────────────────────────────────────────────────
+  // Pure function: seed → { width, height, pixels (RGBA), pins, links, title }.
+  // Terrain is fractal value noise with an elliptical falloff (one main continent
+  // plus islands), shaded by biome and a simple hillshade. Places are scattered
+  // with minimum-distance rejection sampling on suitable terrain.
+  function generateWorld(seed, W = 1600, H = 1000) {
+    const rand = (function mulberry32(a) {
+      return function () {
+        a |= 0; a = a + 0x6D2B79F5 | 0;
+        let t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    })(seed);
+    const pick = arr => arr[Math.floor(rand() * arr.length)];
 
-  fetch(SAMPLE_URL, { method: 'HEAD' })
-    .then(r => { if (!r.ok) throw new Error(); })
-    .catch(() => { document.getElementById('btn-load-sample').style.display = 'none'; });
-
-  // Load sample
-  document.getElementById('btn-load-sample').addEventListener('click', async () => {
-    const btn = document.getElementById('btn-load-sample');
-    btn.textContent = '⏳ Loading…'; btn.disabled = true;
-    try {
-      const resp = await fetch(SAMPLE_URL + '?t=' + Date.now()); // bust cache
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      const proj = await resp.json();
-      loadProjectData(migrateProject(proj));
-      btn.textContent = '✦ Sample loaded!';
-      setTimeout(() => { btn.textContent = '✦ Load Sample'; btn.disabled = false; }, 2000);
-    } catch (err) {
-      alert('Could not load sample.\n\n' + err.message);
-      btn.textContent = '✦ Load Sample'; btn.disabled = false;
+    function makeNoise() {
+      const perm = new Uint8Array(512), vals = new Float32Array(256);
+      for (let i = 0; i < 256; i++) { perm[i] = i; vals[i] = rand(); }
+      for (let i = 255; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); const t = perm[i]; perm[i] = perm[j]; perm[j] = t; }
+      for (let i = 0; i < 256; i++) perm[i + 256] = perm[i];
+      return (x, y) => {
+        const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+        const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+        const X = xi & 255, Y = yi & 255;
+        const a = vals[perm[X + perm[Y]]],     b = vals[perm[X + 1 + perm[Y]]];
+        const c = vals[perm[X + perm[Y + 1]]], d = vals[perm[X + 1 + perm[Y + 1]]];
+        return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+      };
     }
-  });
+    function fbm(n, x, y, oct) {
+      let s = 0, amp = 0.5, f = 1, norm = 0;
+      for (let o = 0; o < oct; o++) { s += amp * n(x * f, y * f); norm += amp; amp *= 0.5; f *= 2.03; }
+      return s / norm;
+    }
+
+    // Elevation and moisture fields
+    const elevN = makeNoise(), moistN = makeNoise(), warpN = makeNoise();
+    const elev = new Float32Array(W * H), moist = new Float32Array(W * H);
+    const aspect = H / W;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const nx = x / W, ny = y / H;
+        const wx = (warpN(nx * 3, ny * 3 * aspect) - 0.5) * 0.35; // domain warp → ragged coasts
+        const e = fbm(elevN, nx * 4 + wx, ny * 4 * aspect + wx, 7);
+        const dx = (nx - 0.5) * 2, dy = (ny - 0.5) * 2;
+        const d = Math.sqrt(dx * dx * 0.9 + dy * dy * 1.1);
+        elev[y * W + x] = e - 0.42 * d * d;
+        moist[y * W + x] = fbm(moistN, nx * 3, ny * 3 * aspect, 4);
+      }
+    }
+    // Thresholds from percentiles, so every seed gets the same proportions:
+    // ~45% land; of the land, the top 32% is hills, 13% mountains, 3% snow.
+    const sample = elev.filter((_, i) => i % 7 === 0).sort();
+    const q = p => sample[Math.min(sample.length - 1, Math.floor(p * sample.length))];
+    const LAND = 0.45, landQ = f => q(1 - LAND + LAND * f);
+    const SEA = q(1 - LAND), DEEP = q(0.25);
+    const T = { beach: landQ(0.025), hill: landQ(0.68), mount: landQ(0.87), snow: landQ(0.97), top: q(0.9999) };
+    const at = (x, y) => elev[Math.min(H - 1, Math.max(0, y)) * W + Math.min(W - 1, Math.max(0, x))];
+
+    // Colour: biome by elevation + moisture, then hillshade, coastline ink, paper grain
+    const pixels = new Uint8ClampedArray(W * H * 4);
+    const mix = (c1, c2, t) => [c1[0] + (c2[0] - c1[0]) * t, c1[1] + (c2[1] - c1[1]) * t, c1[2] + (c2[2] - c1[2]) * t];
+    const C = {
+      deep: [34, 52, 62], shallow: [74, 108, 116], beach: [196, 178, 128],
+      dry: [146, 142, 92], grass: [114, 130, 76], forest: [70, 96, 56],
+      hill: [132, 118, 86], mount: [112, 102, 92], snow: [232, 226, 210], ink: [40, 32, 22],
+    };
+    const smooth = (a, b, v) => { const t = Math.max(0, Math.min(1, (v - a) / (b - a))); return t * t * (3 - 2 * t); };
+    const lowland = m => m < 0.47 ? mix(C.dry, C.grass, smooth(0.36, 0.47, m)) : mix(C.grass, C.forest, smooth(0.50, 0.60, m));
+    const grainN = makeNoise();
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x, e = elev[i], m = moist[i];
+        let c;
+        if (e < SEA) {
+          c = mix(C.deep, C.shallow, Math.max(0, Math.min(1, (e - DEEP) / (SEA - DEEP))) ** 2);
+        } else {
+          if (e < T.beach) c = C.beach;
+          else if (e < T.hill) c = mix(C.beach, lowland(m), smooth(T.beach, T.beach + (T.hill - T.beach) * 0.08, e));
+          else if (e < T.mount) c = mix(lowland(m), C.hill, (e - T.hill) / (T.mount - T.hill));
+          else if (e < T.snow) c = mix(C.hill, C.mount, (e - T.mount) / (T.snow - T.mount));
+          else c = mix(C.mount, C.snow, Math.min(1, (e - T.snow) / ((T.top - T.snow) * 0.5 || 1)));
+          // hillshade from the north-west, scaled to this map's relief
+          const shade = 1 + (at(x - 1, y - 1) - at(x + 1, y + 1)) * (5 / (T.top - SEA));
+          c = c.map(v => v * Math.max(0.7, Math.min(1.3, shade)));
+          // coastline ink where land touches water
+          if (at(x + 1, y) < SEA || at(x - 1, y) < SEA || at(x, y + 1) < SEA || at(x, y - 1) < SEA) c = C.ink;
+        }
+        const g = 0.95 + 0.07 * grainN(x / 3, y / 3);
+        pixels[i * 4] = c[0] * g; pixels[i * 4 + 1] = c[1] * g; pixels[i * 4 + 2] = c[2] * g; pixels[i * 4 + 3] = 255;
+      }
+    }
+
+    // Names
+    const PRE = ['Ash', 'Bryn', 'Cael', 'Dun', 'Eld', 'Fen', 'Gal', 'Hollow', 'Iron', 'Kel', 'Lorn', 'Mar', 'North', 'Oak', 'Raven', 'Silver', 'Thorn', 'Umber', 'Vel', 'Wyn', 'Grey', 'Stone', 'Frost', 'Amber'];
+    const SUF = ['ford', 'hold', 'mere', 'wick', 'stead', 'moor', 'haven', 'gate', 'fall', 'reach', 'watch', 'barrow', 'crest', 'vale', 'helm', 'mouth'];
+    const used = new Set();
+    function placeName() {
+      for (let k = 0; k < 50; k++) { const n = pick(PRE) + pick(SUF); if (!used.has(n)) { used.add(n); return n; } }
+      return pick(PRE) + pick(SUF) + ' ' + (used.size + 1);
+    }
+    const DUNGEON = ['The Sunken Crypt', 'Barrow of Kings', 'The Hollow Deep', 'Wyrmhole Caverns', 'The Black Spire', 'Gloomreach Mines', 'Tomb of the Nameless', 'The Weeping Vault'];
+    const RUIN = ['Fallen Watchtower', 'Shattered Abbey', 'The Old Bridge', 'Broken Henge', 'Ruins of the First Keep'];
+    const PEAK = ['Mount', 'Peak of', 'The Horn of', 'Spire of'];
+
+    // Placement
+    const placed = [];
+    function scatter(count, minDist, ok, attempts = 4000) {
+      const out = [];
+      for (let a = 0; a < attempts && out.length < count; a++) {
+        const x = Math.floor(30 + rand() * (W - 60)), y = Math.floor(30 + rand() * (H - 60));
+        if (!ok(elev[y * W + x], x, y)) continue;
+        if (placed.some(p => Math.hypot(p.x - x, p.y - y) < minDist)) continue;
+        const p = { x, y }; placed.push(p); out.push(p);
+      }
+      return out;
+    }
+    const nearCoast = (x, y) => { for (let r = 6; r <= 30; r += 6) { if (at(x + r, y) < SEA || at(x - r, y) < SEA || at(x, y + r) < SEA || at(x, y - r) < SEA) return true; } return false; };
+    function describe(kind, p) {
+      const e = elev[p.y * W + p.x], m = moist[p.y * W + p.x], coast = nearCoast(p.x, p.y);
+      const where = coast ? 'on the coast' : e > T.hill ? 'in the highlands' : m > 0.55 ? 'deep in the forest' : 'on the open plains';
+      const tag = coast ? 'coastal' : e > T.hill ? 'highland' : m > 0.55 ? 'forest' : 'plains';
+      return { where, tag };
+    }
+
+    const base = Date.now(), pins = [];
+    let id = 0;
+    const add = (p, type, shape, name, desc, tags) => pins.push({ id: base + (id++), x: p.x, y: p.y, name, type, shape, desc, tags, group: '', image: null });
+
+    scatter(5, 220, e => e > T.beach && e < T.hill).forEach(p => {
+      const d = describe('city', p);
+      add(p, 'city', 'castle', placeName(), `A walled city ${d.where}, seat of one of the great houses.`, [d.tag, 'capital']);
+    });
+    scatter(7, 130, e => e > T.beach && e < T.mount).forEach(p => {
+      const d = describe('town', p);
+      add(p, 'town', 'tower', placeName(), `A market town ${d.where}.`, [d.tag]);
+    });
+    scatter(9, 90, e => e > T.beach && e < T.mount).forEach(p => {
+      const d = describe('village', p);
+      add(p, 'village', 'village', placeName(), `A quiet village ${d.where}.`, [d.tag]);
+    });
+    scatter(4, 120, e => e > T.hill).forEach((p, i) => add(p, 'dungeon', 'skull', DUNGEON[i % DUNGEON.length], 'Few who enter return. Locals will not speak its name after dark.', ['danger']));
+    scatter(3, 120, e => e > T.beach).forEach((p, i) => add(p, 'ruin', 'ruins', RUIN[i % RUIN.length], 'Weathered stones from an older age.', ['ancient']));
+
+    // Highest point becomes a landmark
+    let best = 0;
+    for (let i = 0; i < elev.length; i++) if (elev[i] > elev[best]) best = i;
+    const peak = { x: best % W, y: Math.floor(best / W) };
+    if (elev[best] > T.mount) add(peak, 'landmark', 'mountain', pick(PEAK) + ' ' + pick(PRE), 'The highest summit in the land.', ['highland']);
+
+    // Roads: each city to its two nearest settlements, each town and village to its nearest city or town
+    const links = [], seen = new Set();
+    const link = (a, b) => { const k = a.id < b.id ? a.id + ':' + b.id : b.id + ':' + a.id; if (!seen.has(k)) { seen.add(k); links.push({ id: base + 10000 + links.length, fromId: a.id, toId: b.id }); } };
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const cities = pins.filter(p => p.type === 'city');
+    const hubs = pins.filter(p => p.type === 'city' || p.type === 'town');
+    cities.forEach(c => hubs.filter(h => h !== c).sort((a, b) => dist(c, a) - dist(c, b)).slice(0, 2).forEach(h => link(c, h)));
+    pins.filter(p => p.type === 'town' || p.type === 'village').forEach(p => {
+      const nearest = hubs.filter(h => h !== p).sort((a, b) => dist(p, a) - dist(p, b))[0];
+      if (nearest) link(p, nearest);
+    });
+
+    const title = 'The Realm of ' + pick(PRE) + pick(['ia', 'ar', 'eth', 'ora', 'mund', 'dor']);
+    return { width: W, height: H, pixels, pins, links, title };
+  }
+
+  async function loadRandomWorld() {
+    if (pins.length && !confirm('Replace the current map with a randomly generated one?')) return;
+    const btns = ['btn-random-map', 'btn-random-map-start'].map(id => document.getElementById(id));
+    btns.forEach(b => { b.dataset.label = b.textContent; b.textContent = '⏳ Generating…'; b.disabled = true; });
+    await new Promise(r => setTimeout(r, 30)); // let the label repaint before the ~0.5s generation loop
+    try {
+      const seed = Math.floor(Math.random() * 2 ** 31);
+      const world = generateWorld(seed);
+      const cv = document.createElement('canvas');
+      cv.width = world.width; cv.height = world.height;
+      cv.getContext('2d').putImageData(new ImageData(world.pixels, world.width, world.height), 0, 0);
+      const src = cv.toDataURL('image/jpeg', 0.92);
+      // Make sure the categories the generated pins use exist
+      Object.entries({ city: '#e8a020', town: '#d48030', village: '#a0c860', dungeon: '#c03030', landmark: '#6090d0', ruin: '#8060a0' })
+        .forEach(([k, v]) => { if (!PIN_COLORS[k]) PIN_COLORS[k] = v; });
+      resetLayers([{ name: 'Terrain (seed ' + seed + ')', src }]);
+      pins = world.pins; links = world.links;
+      drawings = []; regions = []; stamps = []; snapshots = []; tourStops = [];
+      fogInitialised = false;
+      undoStack.length = 0; redoStack.length = 0; updateUndoButtons();
+      document.getElementById('title-text').textContent = '◆ ' + world.title;
+      rebuildTypeSelect();
+      renderStamps();
+      // Pins render once the terrain image finishes loading (renderLayerImages → onload)
+    } catch (err) {
+      alert('Could not generate a map.\n\n' + err.message);
+    } finally {
+      btns.forEach(b => { b.textContent = b.dataset.label; b.disabled = false; });
+    }
+  }
+  document.getElementById('btn-random-map').addEventListener('click', loadRandomWorld);
+  document.getElementById('btn-random-map-start').addEventListener('click', (e) => { e.stopPropagation(); loadRandomWorld(); });
+
 
 
   document.getElementById('btn-load-img').addEventListener('click', () => fileInputImg.click());
@@ -5868,7 +6044,7 @@ td{padding:8px 12px;border-bottom:1px solid #221c14;vertical-align:top}tr:hover 
 <p>This is a single-file browser app — no installation, no account, no server. Everything lives in this HTML file. Open it locally, create your world, save a project JSON.</p>
 
 <div class="help-highlight">
-  <strong>Quick start:</strong> Click <em>Load Map</em> to load your map image, then click the map to place your first pin.
+  <strong>Quick start:</strong> Click <em>Load Map</em> to load your map image, or <em>🎲 Random Map</em> to generate a world with terrain, settlements and roads. Then click the map to place your first pin.
 </div>
 
 <h4>The Toolbar</h4>

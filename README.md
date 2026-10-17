@@ -4,11 +4,11 @@ A browser-based editor for annotating fantasy and world maps with pins, regions,
 
 **[Try it live →](https://ashe-barone.github.io/Fantasy-Map-Editor/)**
 
-<!-- Add a screenshot: save it as docs/screenshot.png and uncomment the line below -->
-<!-- ![Fantasy Map Editor](docs/screenshot.png) -->
+![Fantasy Map Editor showing a generated world](docs/screenshot.png)
 
 ## Features
 
+- **🎲 Random world generation**: one click builds a seeded continent with shaded terrain, named cities, towns, villages, dungeons and ruins, and a road network, all fully editable
 - **Pins** with 69 vector icon shapes, categories, tags, groups, images, and rich-text descriptions (headings, callouts, tables, embedded images)
 - **Wiki-style links**: `[[Pin Name]]` inside a description jumps to that pin
 - **Regions**: freehand polygons, circles, stars, arcs, and rectangles, with draggable vertex editing
@@ -38,6 +38,7 @@ The editor is written in plain JavaScript, HTML, and CSS, with no framework or l
 | Freehand drawing | Ramer–Douglas–Peucker line simplification, with a tolerance that scales with stroke width and zoom level. |
 | Region fill | Ray-casting point-in-polygon test to scatter stamps inside arbitrary shapes. |
 | Relationship graph | Force-directed layout with pairwise repulsion, spring attraction along links, and centering gravity, run on a canvas loop until it settles. |
+| World generation | Seeded fractal value noise with domain warping for ragged coastlines and an elliptical falloff that shapes a continent. Sea level and biome bands come from elevation percentiles, so every seed has similar proportions. Places use minimum-distance rejection sampling on suitable terrain, and roads connect each settlement to its nearest hubs. |
 | Undo/redo | Bounded snapshot stacks (50 states) of pins, links, drawings, and regions. |
 | Persistence | Versioned project JSON with a migration chain, so older save files still load. |
 | Export viewer | Builds a standalone HTML document at runtime. Map images are embedded as data URLs, and pin icon definitions are serialized from the editor's own shape table so the viewer and editor always match. |
